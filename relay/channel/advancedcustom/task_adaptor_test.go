@@ -95,6 +95,11 @@ func TestAdvancedCustomTaskAdaptorPollsConfiguredRoute(t *testing.T) {
 		assert.Equal(t, "/models/seedance-2-5-260628/tasks/upstream-task-42", req.URL.Path)
 		assert.Equal(t, "cn", req.URL.Query().Get("region"))
 		assert.Equal(t, "Token test-key", req.Header.Get("X-API-Key"))
+		bodyBytes, bodyErr := io.ReadAll(req.Body)
+		assert.NoError(t, bodyErr)
+		var reqBody map[string]any
+		assert.NoError(t, common.Unmarshal(bodyBytes, &reqBody))
+		assert.Equal(t, "seedance-2-5-260628", reqBody["model"])
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"upstream-task-42","status":"running"}`))
 	}))

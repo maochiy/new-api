@@ -1,12 +1,15 @@
 package advancedcustom
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	taskdoubao "github.com/QuantumNous/new-api/relay/channel/task/doubao"
@@ -14,6 +17,10 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
+
+// fetchTaskPollingTimeout bounds each upstream task-status request so a hung
+// upstream cannot permanently block the polling goroutine.
+const fetchTaskPollingTimeout = 30 * time.Second
 
 // TaskAdaptor adds asynchronous video support to Advanced Custom channels.
 // The configured route controls the upstream URL and authentication, while the
@@ -62,8 +69,9 @@ func (a *TaskAdaptor) FetchTask(baseURL, key string, body map[string]any, proxy 
 	channelMeta := *a.info.ChannelMeta
 	channelMeta.ChannelBaseUrl = baseURL
 	channelMeta.ApiKey = key
-	if modelName, ok := body["model"].(string); ok && modelName != "" {
-		channelMeta.UpstreamModelName = modelName
+	upstreamModel, _ := body["model"].(string)
+	if upstreamModel != "" {
+		channelMeta.UpstreamModelName = upstreamModel
 	}
 	info.ChannelMeta = &channelMeta
 
@@ -80,7 +88,13 @@ func (a *TaskAdaptor) FetchTask(baseURL, key string, body map[string]any, proxy 
 	parsedURL.Path = basePath + "/" + taskID
 	parsedURL.RawPath = baseEscapedPath + "/" + url.PathEscape(taskID)
 
-	req, err := http.NewRequest(http.MethodGet, parsedURL.String(), nil)
+	// The upstream task-status endpoint expects a JSON body (at least the model
+	// field) even on GET; a bodyless GET hangs with no response.
+	payload, err := common.Marshal(map[string]string{"model": upstreamModel})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodGet, parsedURL.String(), bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +108,12 @@ func (a *TaskAdaptor) FetchTask(baseURL, key string, body map[string]any, proxy 
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
-	return client.Do(req)
+	// Timeout covers the full request/response cycle including body reads, so a
+	// hung upstream cannot block the polling goroutine (a cancelled context
+	// would abort body reads after FetchTask returns).
+	pollingClient := *client
+	pollingClient.Timeout = fetchTaskPollingTimeout
+	return pollingClient.Do(req)
 }
 
 func (a *TaskAdaptor) videoRoute(info *relaycommon.RelayInfo) (dto.AdvancedCustomRoute, error) {
