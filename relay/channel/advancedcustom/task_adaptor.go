@@ -1,7 +1,6 @@
 package advancedcustom
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	taskdoubao "github.com/QuantumNous/new-api/relay/channel/task/doubao"
@@ -88,13 +86,7 @@ func (a *TaskAdaptor) FetchTask(baseURL, key string, body map[string]any, proxy 
 	parsedURL.Path = basePath + "/" + taskID
 	parsedURL.RawPath = baseEscapedPath + "/" + url.PathEscape(taskID)
 
-	// The upstream task-status endpoint expects a JSON body (at least the model
-	// field) even on GET; a bodyless GET hangs with no response.
-	payload, err := common.Marshal(map[string]string{"model": upstreamModel})
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequest(http.MethodGet, parsedURL.String(), bytes.NewReader(payload))
+	req, err := http.NewRequest(http.MethodGet, parsedURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
