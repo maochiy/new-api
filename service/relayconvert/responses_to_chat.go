@@ -556,6 +556,26 @@ func (s *ResponsesToChatStreamState) ensureToolForEvent(event *dto.ResponsesStre
 
 	tool := s.toolByKey[key]
 	if tool == nil {
+		// Terminal events (response.completed) and done events carry the item
+		// without output_index, so the key differs from the output-index key
+		// used while streaming. Resolve the tool registered during streaming
+		// via item/call ID to avoid emitting the same call twice.
+		if itemID := strings.TrimSpace(event.Item.ID); itemID != "" {
+			if existingKey, ok := s.itemIDToKey[itemID]; ok {
+				key = existingKey
+				tool = s.toolByKey[key]
+			}
+		}
+	}
+	if tool == nil {
+		if callID := strings.TrimSpace(event.Item.CallId); callID != "" {
+			if existingKey, ok := s.callIDToKey[callID]; ok {
+				key = existingKey
+				tool = s.toolByKey[key]
+			}
+		}
+	}
+	if tool == nil {
 		tool = &responsesStreamTool{Key: key, Index: s.nextToolIndex}
 		s.nextToolIndex++
 		s.toolByKey[key] = tool

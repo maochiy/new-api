@@ -335,6 +335,127 @@ func TestResponsesStreamEventToChatChunksDrainsItemOnlyPendingArgsWhenOutputInde
 	assert.Empty(t, state.pendingArgsByItemID)
 }
 
+func TestResponsesStreamEventToChatChunksDoesNotDuplicateToolCallsFromTerminalOutput(t *testing.T) {
+	state := newTestResponsesStreamState()
+	indexRead := 0
+	indexGrep := 1
+	readArgs := `{"file_path":"/tmp/a.go"}`
+	grepArgs := `{"pattern":"TODO"}`
+
+	var chunks []dto.ChatCompletionsStreamResponse
+	chunks = append(chunks, mustStreamChunks(t, state, &dto.ResponsesStreamResponse{Type: responsesEventCreated})...)
+	for _, tc := range []struct {
+		outputIndex int
+		itemID      string
+		callID      string
+		name        string
+		arguments   string
+	}{
+		{indexRead, "fc_read", "call-abc-0", "Read", readArgs},
+		{indexGrep, "fc_grep", "call-abc-1", "Grep", grepArgs},
+	} {
+		outputIndex := tc.outputIndex
+		chunks = append(chunks, mustStreamChunks(t, state, &dto.ResponsesStreamResponse{
+			Type:        responsesEventOutputItemAdded,
+			OutputIndex: &outputIndex,
+			Item: &dto.ResponsesOutput{
+				Type:   responsesOutputTypeFunctionCall,
+				ID:     tc.itemID,
+				CallId: tc.callID,
+				Name:   tc.name,
+			},
+		})...)
+		chunks = append(chunks, mustStreamChunks(t, state, &dto.ResponsesStreamResponse{
+			Type:        responsesEventFunctionArgsDelta,
+			OutputIndex: &outputIndex,
+			ItemID:      tc.itemID,
+			Delta:       tc.arguments,
+		})...)
+		chunks = append(chunks, mustStreamChunks(t, state, &dto.ResponsesStreamResponse{
+			Type:        responsesEventFunctionArgsDone,
+			OutputIndex: &outputIndex,
+			ItemID:      tc.itemID,
+			Arguments:   tc.arguments,
+		})...)
+		chunks = append(chunks, mustStreamChunks(t, state, &dto.ResponsesStreamResponse{
+			Type:        responsesEventOutputItemDone,
+			OutputIndex: &outputIndex,
+			Item: &dto.ResponsesOutput{
+				Type:      responsesOutputTypeFunctionCall,
+				ID:        tc.itemID,
+				CallId:    tc.callID,
+				Name:      tc.name,
+				Arguments: []byte(tc.arguments),
+			},
+		})...)
+	}
+	chunks = append(chunks, mustStreamChunks(t, state, &dto.ResponsesStreamResponse{
+		Type: responsesEventCompleted,
+		Response: &dto.OpenAIResponsesResponse{
+			Status: []byte(`"completed"`),
+			Output: []dto.ResponsesOutput{
+				{
+					Type:      responsesOutputTypeFunctionCall,
+					ID:        "fc_read",
+					CallId:    "call-abc-0",
+					Name:      "Read",
+					Arguments: []byte(readArgs),
+				},
+				{
+					Type:      responsesOutputTypeFunctionCall,
+					ID:        "fc_grep",
+					CallId:    "call-abc-1",
+					Name:      "Grep",
+					Arguments: []byte(grepArgs),
+				},
+			},
+			Usage: &dto.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		},
+	})...)
+
+	// Merge chunks the way a chat completions client does: accumulate deltas
+	// per tool call index, then verify each logical call appears exactly once.
+	merged := make(map[int]*dto.ToolCallResponse)
+	var order []int
+	for _, chunk := range chunks {
+		for _, choice := range chunk.Choices {
+			for _, call := range choice.Delta.ToolCalls {
+				require.NotNil(t, call.Index)
+				idx := *call.Index
+				existing, ok := merged[idx]
+				if !ok {
+					merged[idx] = &dto.ToolCallResponse{ID: call.ID, Type: call.Type, Function: dto.FunctionResponse{
+						Name:      call.Function.Name,
+						Arguments: call.Function.Arguments,
+					}}
+					order = append(order, idx)
+					continue
+				}
+				if call.ID != "" {
+					assert.Equal(t, existing.ID, call.ID, "index %d reused for different call IDs", idx)
+				}
+				if call.Function.Name != "" {
+					existing.Function.Name = call.Function.Name
+				}
+				existing.Function.Arguments += call.Function.Arguments
+			}
+		}
+	}
+	require.Len(t, order, 2)
+	ids := make(map[string]bool)
+	for _, idx := range order {
+		call := merged[idx]
+		assert.False(t, ids[call.ID], "tool call %s emitted under more than one index", call.ID)
+		ids[call.ID] = true
+	}
+	assert.Equal(t, "call-abc-0", merged[0].ID)
+	assert.Equal(t, "Read", merged[0].Function.Name)
+	assert.Equal(t, readArgs, merged[0].Function.Arguments)
+	assert.Equal(t, "call-abc-1", merged[1].ID)
+	assert.Equal(t, "Grep", merged[1].Function.Name)
+	assert.Equal(t, grepArgs, merged[1].Function.Arguments)
+}
+
 func TestResponsesStreamEventToChatChunksCustomToolAndReasoning(t *testing.T) {
 	state := newTestResponsesStreamState()
 	outputIndex := 0
